@@ -211,7 +211,7 @@ class MallaTeniente:
                 self.grafo[n2].append((n1, distancia))
     
     def nodo_mas_cercano(self, x, y):
-        """Encuentra el nodo más cercano a una coordenada (x, y)."""
+        """Encuentra el nodo más cercano a una coordenada (x, y) (Distancia aérea)."""
         min_dist = float('inf')
         nodo_cercano = None
         for nodo_id, coords in self.nodos.items():
@@ -221,26 +221,73 @@ class MallaTeniente:
                 nodo_cercano = nodo_id
         return nodo_cercano, min_dist
     
+    def _distancia_teniente_local(self, x1, y1, x2, y2):
+        """
+        Calcula la distancia y el punto intermedio para ir de un punto arbitrario (x1, y1)
+        a otro (x2, y2) respetando SOLO movimientos horizontales (Calle, 0°) y 
+        diagonales (Zanja, 60°). 
+        
+        Resuelve el sistema vectorial: P2 = P1 + a*Vec_Calle + b*Vec_Zanja
+        
+        Retorna:
+            distancia_total: |a| + |b|
+            punto_intermedio: Coordenada (x, y) donde cambia de Calle a Zanja.
+        """
+        dx = x2 - x1
+        dy = y2 - y1
+        
+        rad_zanja = np.radians(self.angulo_zanja)
+        sin60 = np.sin(rad_zanja)
+        cos60 = np.cos(rad_zanja)
+        
+        # Sistema de ecuaciones:
+        # dx = a * 1 + b * cos(60)
+        # dy = a * 0 + b * sin(60)  => b = dy / sin(60)
+        
+        if abs(sin60) < 1e-9: # Seguridad matemática
+             return abs(dx) + abs(dy), (x2, y1)
+
+        b = dy / sin60
+        a = dx - (b * cos60)
+        
+        distancia = abs(a) + abs(b)
+        
+        # Calculamos el punto intermedio asumiendo ruta Calle -> Zanja
+        # Caminamos 'a' en horizontal desde el origen
+        x_int = x1 + a
+        y_int = y1
+        
+        return distancia, (x_int, y_int)
+
     def distancia_ruta(self, x_origen, y_origen, x_destino, y_destino):
         """
-        Calcula la distancia de ruta más corta entre dos puntos usando BFS 
-        en la red de calles y zanjas.
+        Calcula la distancia de ruta usando geometría Teniente.
+        Punto -> (Calle/Zanja) -> Red -> (Calle/Zanja) -> Punto
         """
-        # Encontrar nodos más cercanos
-        nodo_origen, dist_origen = self.nodo_mas_cercano(x_origen, y_origen)
-        nodo_destino, dist_destino = self.nodo_mas_cercano(x_destino, y_destino)
+        # Encontrar nodos más cercanos en la red
+        nodo_origen, _ = self.nodo_mas_cercano(x_origen, y_origen)
+        nodo_destino, _ = self.nodo_mas_cercano(x_destino, y_destino)
         
         if nodo_origen is None or nodo_destino is None:
             return float('inf')
         
-        # BFS para encontrar la ruta más corta
+        # Distancia dentro de la red mallada (BFS)
         distancia_red = self._bfs_distancia(nodo_origen, nodo_destino)
         
         if distancia_red == float('inf'):
             return float('inf')
         
-        # Distancia total = dist a nodo origen + dist en red + dist desde nodo destino
-        return dist_origen + distancia_red + dist_destino
+        # Coordenadas de los nodos de entrada y salida a la red
+        nx_o, ny_o = self.nodos[nodo_origen]['x'], self.nodos[nodo_origen]['y']
+        nx_d, ny_d = self.nodos[nodo_destino]['x'], self.nodos[nodo_destino]['y']
+
+        # Distancia desde el origen real hasta el nodo de entrada (Geometría Teniente)
+        dist_inicio, _ = self._distancia_teniente_local(x_origen, y_origen, nx_o, ny_o)
+        
+        # Distancia desde el nodo de salida hasta el destino real (Geometría Teniente)
+        dist_fin, _ = self._distancia_teniente_local(nx_d, ny_d, x_destino, y_destino)
+        
+        return dist_inicio + distancia_red + dist_fin
     
     def _bfs_distancia(self, nodo_inicio, nodo_fin):
         """BFS para encontrar la distancia más corta entre dos nodos."""
@@ -269,7 +316,8 @@ class MallaTeniente:
     
     def obtener_ruta(self, x_origen, y_origen, x_destino, y_destino):
         """
-        Devuelve la lista de coordenadas (x, y) de la ruta más corta.
+        Devuelve la lista de coordenadas (x, y) de la ruta para graficar,
+        incluyendo los quiebres geométricos para entrar/salir de la red.
         """
         nodo_origen, _ = self.nodo_mas_cercano(x_origen, y_origen)
         nodo_destino, _ = self.nodo_mas_cercano(x_destino, y_destino)
@@ -282,11 +330,27 @@ class MallaTeniente:
         if not ruta_nodos:
             return []
         
-        # Convertir nodos a coordenadas
-        ruta_coords = [(x_origen, y_origen)]  # Inicio desde origen real
+        ruta_coords = []
+        
+        # 1. Tramo Inicial: Origen -> Nodo de entrada
+        # Calculamos punto intermedio para respetar angulos
+        nx_o, ny_o = self.nodos[nodo_origen]['x'], self.nodos[nodo_origen]['y']
+        _, p_int_inicio = self._distancia_teniente_local(x_origen, y_origen, nx_o, ny_o)
+        
+        ruta_coords.append((x_origen, y_origen))
+        ruta_coords.append(p_int_inicio)
+        # El nodo exacto (nx_o, ny_o) se añade en el bucle siguiente
+        
+        # 2. Tramo Red: Nodos
         for nodo in ruta_nodos:
             ruta_coords.append((self.nodos[nodo]['x'], self.nodos[nodo]['y']))
-        ruta_coords.append((x_destino, y_destino))  # Termina en destino real
+        
+        # 3. Tramo Final: Nodo de salida -> Destino
+        nx_d, ny_d = self.nodos[nodo_destino]['x'], self.nodos[nodo_destino]['y']
+        _, p_int_fin = self._distancia_teniente_local(nx_d, ny_d, x_destino, y_destino)
+        
+        ruta_coords.append(p_int_fin)
+        ruta_coords.append((x_destino, y_destino))
         
         return ruta_coords
     
